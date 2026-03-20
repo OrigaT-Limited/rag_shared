@@ -1,0 +1,14 @@
+[project]
+name = "rag-shared"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "raganything>=1.2.9",
+    "lightrag-hku>=1.4.0",
+    "pymilvus>=2.6.0",
+    "redis>=5.0.0",
+    "aiohttp>=3.8.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "numpy>=1.24.0",
+]
