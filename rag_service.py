@@ -13,6 +13,8 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Coroutine, Optional
 
+import numpy as np
+
 from raganything import RAGAnything, RAGAnythingConfig
 from lightrag.utils import EmbeddingFunc
 
@@ -109,7 +111,8 @@ class RAGService:
         async def _embed(texts):
             if isinstance(texts, str):
                 texts = [texts]
-            return await emb_adapter.embed(texts)
+            result = await emb_adapter.embed(texts)
+            return np.array(result)
 
         config = RAGAnythingConfig(
             working_dir=self.working_dir,
