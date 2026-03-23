@@ -20,29 +20,56 @@ import tkinter as tk
 from tkinter import filedialog, scrolledtext, ttk
 from pathlib import Path
 
+import aiohttp
+
 # Ensure rag_shared is importable when running from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from rag_shared import RAGService
+from rag_shared.config import DASHSCOPE_API_KEY, TIMEOUT
 
 
 # ---------------------------------------------------------------------------
-# Stub LLM — caller normally provides this; playground uses a placeholder
+# Real LLM — uses DashScope Qwen text model for KG entity/relation extraction
 # ---------------------------------------------------------------------------
-async def _stub_llm(
+_LLM_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+_LLM_MODEL = "qwen-plus"
+_LLM_HEADERS = {
+    "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+    "Content-Type": "application/json",
+}
+
+
+async def _qwen_llm(
     prompt: str,
     system_prompt: str | None = None,
     history_messages: list | None = None,
     **kwargs,
 ) -> str:
-    """Minimal LLM stub so RAGService can initialise.
+    """LightRAG-compatible LLM function backed by DashScope Qwen."""
+    msgs = []
+    if system_prompt:
+        msgs.append({"role": "system", "content": system_prompt})
+    for m in (history_messages or []):
+        msgs.append(m)
+    msgs.append({"role": "user", "content": prompt})
 
-    In production the caller (AI-ModelLayer) injects a real LLM function.
-    For ingestion-only use the LLM is called by LightRAG to extract KG
-    entities/relations.  Replace this stub with a real model call if you
-    need high-quality extraction.
-    """
-    return ""
+    payload = {
+        "model": _LLM_MODEL,
+        "messages": msgs,
+        "max_tokens": kwargs.get("max_tokens", 4096),
+        "temperature": kwargs.get("temperature", 0.1),
+    }
+
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=TIMEOUT)
+    ) as session:
+        async with session.post(
+            _LLM_URL, json=payload, headers=_LLM_HEADERS
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+            return data["choices"][0]["message"]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -68,22 +95,36 @@ def _run_coro(coro):
 # ---------------------------------------------------------------------------
 # GUI Application
 # ---------------------------------------------------------------------------
-class RAGIngestApp:
+class RAGPlaygroundApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("RAG File Ingestion — Playground")
-        root.geometry("720x520")
-        root.minsize(600, 400)
+        root.title("RAG Playground")
+        root.geometry("800x620")
+        root.minsize(700, 500)
 
-        self.service = RAGService(llm_model_func=_stub_llm, workspace="playground")
+        self.service = RAGService(llm_model_func=_qwen_llm, workspace="playground")
         self._pending: list[str] = []
 
         self._build_ui()
 
     # ---- UI construction ---------------------------------------------------
     def _build_ui(self):
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # --- Tab 1: Ingest ---
+        ingest_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(ingest_tab, text="Ingest")
+        self._build_ingest_tab(ingest_tab)
+
+        # --- Tab 2: Query ---
+        query_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(query_tab, text="Query")
+        self._build_query_tab(query_tab)
+
+    def _build_ingest_tab(self, parent: ttk.Frame):
         # Top frame — buttons
-        btn_frame = ttk.Frame(self.root, padding=8)
+        btn_frame = ttk.Frame(parent)
         btn_frame.pack(fill=tk.X)
 
         self.btn_select = ttk.Button(
@@ -102,22 +143,67 @@ class RAGIngestApp:
         self.btn_clear.pack(side=tk.LEFT)
 
         # File list
-        list_frame = ttk.LabelFrame(self.root, text="Selected files", padding=6)
-        list_frame.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 4))
+        list_frame = ttk.LabelFrame(parent, text="Selected files", padding=6)
+        list_frame.pack(fill=tk.BOTH, expand=False, pady=(8, 4))
 
         self.file_listbox = tk.Listbox(list_frame, height=6, selectmode=tk.EXTENDED)
         self.file_listbox.pack(fill=tk.BOTH, expand=True)
 
         # Log area
-        log_frame = ttk.LabelFrame(self.root, text="Log", padding=6)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        log_frame = ttk.LabelFrame(parent, text="Log", padding=6)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
         self.log = scrolledtext.ScrolledText(log_frame, state=tk.DISABLED, height=10)
         self.log.pack(fill=tk.BOTH, expand=True)
 
         # Progress bar
-        self.progress = ttk.Progressbar(self.root, mode="determinate")
-        self.progress.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self.progress = ttk.Progressbar(parent, mode="determinate")
+        self.progress.pack(fill=tk.X, pady=(0, 4))
+
+    def _build_query_tab(self, parent: ttk.Frame):
+        # --- Prompt input ---
+        prompt_frame = ttk.LabelFrame(parent, text="Prompt", padding=6)
+        prompt_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 4))
+
+        self.prompt_text = scrolledtext.ScrolledText(prompt_frame, height=5, wrap=tk.WORD)
+        self.prompt_text.pack(fill=tk.BOTH, expand=True)
+
+        # --- Controls ---
+        ctrl_frame = ttk.Frame(parent)
+        ctrl_frame.pack(fill=tk.X, pady=4)
+
+        ttk.Label(ctrl_frame, text="Mode:").pack(side=tk.LEFT, padx=(0, 4))
+        self.query_mode = tk.StringVar(value="hybrid")
+        mode_combo = ttk.Combobox(
+            ctrl_frame,
+            textvariable=self.query_mode,
+            values=["naive", "local", "global", "hybrid", "mix"],
+            state="readonly",
+            width=10,
+        )
+        mode_combo.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_query = ttk.Button(
+            ctrl_frame, text="Send Query", command=self._on_query
+        )
+        self.btn_query.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_clear_query = ttk.Button(
+            ctrl_frame, text="Clear", command=self._on_clear_query
+        )
+        self.btn_clear_query.pack(side=tk.LEFT)
+
+        self.query_spinner = ttk.Progressbar(ctrl_frame, mode="indeterminate", length=80)
+        self.query_spinner.pack(side=tk.RIGHT)
+
+        # --- Response output ---
+        resp_frame = ttk.LabelFrame(parent, text="Response", padding=6)
+        resp_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        self.response_text = scrolledtext.ScrolledText(
+            resp_frame, state=tk.DISABLED, height=12, wrap=tk.WORD
+        )
+        self.response_text.pack(fill=tk.BOTH, expand=True)
 
     # ---- Logging helper ----------------------------------------------------
     def _log(self, msg: str):
@@ -196,13 +282,52 @@ class RAGIngestApp:
         self.btn_select.configure(state=tk.NORMAL)
         self.progress["value"] = 0
 
+    # ---- Query callbacks ---------------------------------------------------
+    def _on_query(self):
+        prompt = self.prompt_text.get("1.0", tk.END).strip()
+        if not prompt:
+            return
+        self.btn_query.configure(state=tk.DISABLED)
+        self.query_spinner.start(10)
+        self.response_text.configure(state=tk.NORMAL)
+        self.response_text.delete("1.0", tk.END)
+        self.response_text.insert(tk.END, "Querying…\n")
+        self.response_text.configure(state=tk.DISABLED)
+
+        mode = self.query_mode.get()
+        threading.Thread(
+            target=self._query_worker, args=(prompt, mode), daemon=True
+        ).start()
+
+    def _query_worker(self, prompt: str, mode: str):
+        try:
+            future = _run_coro(self.service.query(prompt, mode=mode))
+            result = future.result()
+            self.root.after(0, self._show_response, result)
+        except Exception as exc:
+            self.root.after(0, self._show_response, f"Error: {exc}")
+
+    def _show_response(self, text: str):
+        self.response_text.configure(state=tk.NORMAL)
+        self.response_text.delete("1.0", tk.END)
+        self.response_text.insert(tk.END, text)
+        self.response_text.configure(state=tk.DISABLED)
+        self.query_spinner.stop()
+        self.btn_query.configure(state=tk.NORMAL)
+
+    def _on_clear_query(self):
+        self.prompt_text.delete("1.0", tk.END)
+        self.response_text.configure(state=tk.NORMAL)
+        self.response_text.delete("1.0", tk.END)
+        self.response_text.configure(state=tk.DISABLED)
+
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
     root = tk.Tk()
-    RAGIngestApp(root)
+    RAGPlaygroundApp(root)
     root.mainloop()
 
 
