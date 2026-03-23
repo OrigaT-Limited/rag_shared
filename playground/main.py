@@ -23,7 +23,58 @@ from pathlib import Path
 # Ensure rag_shared is importable when running from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from rag_shared import RAGService
+from rag_shared import RAGService, LLMAdapter, VLMAdapter, EmbeddingAdapter
+
+
+# ---------------------------------------------------------------------------
+# Token usage tracker
+# ---------------------------------------------------------------------------
+class TokenTracker:
+    """Accumulates token usage reported by adapters, split by phase."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._phase: str = "insert"  # "insert" or "query"
+        # {phase: {adapter: {field: count}}}
+        self._counts: dict[str, dict[str, dict[str, int]]] = {
+            "insert": {},
+            "query": {},
+        }
+
+    def set_phase(self, phase: str):
+        self._phase = phase
+
+    def on_usage(self, adapter_name: str, usage: dict):
+        with self._lock:
+            phase_data = self._counts[self._phase]
+            if adapter_name not in phase_data:
+                phase_data[adapter_name] = {}
+            for key, val in usage.items():
+                if isinstance(val, int):
+                    phase_data[adapter_name][key] = (
+                        phase_data[adapter_name].get(key, 0) + val
+                    )
+
+    def summary(self, phase: str) -> str:
+        with self._lock:
+            phase_data = self._counts.get(phase, {})
+        if not phase_data:
+            return "No usage recorded"
+        lines = []
+        total_all = 0
+        for adapter in sorted(phase_data):
+            fields = phase_data[adapter]
+            total = fields.get("total_tokens", 0)
+            prompt = fields.get("prompt_tokens", 0)
+            completion = fields.get("completion_tokens", 0)
+            total_all += total
+            lines.append(f"  {adapter}: prompt={prompt:,}  completion={completion:,}  total={total:,}")
+        lines.insert(0, f"Total tokens: {total_all:,}")
+        return "\n".join(lines)
+
+    def reset(self, phase: str):
+        with self._lock:
+            self._counts[phase] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -53,10 +104,21 @@ class RAGPlaygroundApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("RAG Playground")
-        root.geometry("800x620")
-        root.minsize(700, 500)
+        root.geometry("800x700")
+        root.minsize(700, 580)
 
-        self.service = RAGService(workspace="playground")
+        self.tracker = TokenTracker()
+
+        llm = LLMAdapter(on_usage=self.tracker.on_usage)
+        vlm = VLMAdapter(on_usage=self.tracker.on_usage)
+        emb = EmbeddingAdapter(on_usage=self.tracker.on_usage)
+
+        self.service = RAGService(
+            llm_model_func=llm,
+            vlm_adapter=vlm,
+            embedding_adapter=emb,
+            workspace="playground",
+        )
         self._pending: list[str] = []
 
         self._build_ui()
@@ -114,6 +176,10 @@ class RAGPlaygroundApp:
         self.progress = ttk.Progressbar(parent, mode="determinate")
         self.progress.pack(fill=tk.X, pady=(0, 4))
 
+        # Token usage
+        self.ingest_token_label = ttk.Label(parent, text="Tokens: —", anchor=tk.W)
+        self.ingest_token_label.pack(fill=tk.X, pady=(0, 2))
+
     def _build_query_tab(self, parent: ttk.Frame):
         # --- Prompt input ---
         prompt_frame = ttk.LabelFrame(parent, text="Prompt", padding=6)
@@ -149,6 +215,10 @@ class RAGPlaygroundApp:
 
         self.query_spinner = ttk.Progressbar(ctrl_frame, mode="indeterminate", length=80)
         self.query_spinner.pack(side=tk.RIGHT)
+
+        # --- Token usage ---
+        self.query_token_label = ttk.Label(parent, text="Tokens: —", anchor=tk.W)
+        self.query_token_label.pack(fill=tk.X, pady=(0, 2))
 
         # --- Response output ---
         resp_frame = ttk.LabelFrame(parent, text="Response", padding=6)
@@ -194,6 +264,8 @@ class RAGPlaygroundApp:
         self.file_listbox.delete(0, tk.END)
         self.btn_insert.configure(state=tk.DISABLED)
         self.progress["value"] = 0
+        self.tracker.reset("insert")
+        self.ingest_token_label.configure(text="Tokens: —")
         self._log("Cleared file list.")
 
     def _on_insert(self):
@@ -204,6 +276,8 @@ class RAGPlaygroundApp:
         files = list(self._pending)
         self.progress["maximum"] = len(files)
         self.progress["value"] = 0
+        self.tracker.reset("insert")
+        self.tracker.set_phase("insert")
         self._log(f"Starting ingestion of {len(files)} file(s)…")
 
         # Run ingestion in background so the GUI stays responsive
@@ -228,9 +302,15 @@ class RAGPlaygroundApp:
 
     def _step_progress(self):
         self.progress["value"] = self.progress["value"] + 1
+        self.ingest_token_label.configure(
+            text=self.tracker.summary("insert")
+        )
 
     def _ingest_done(self):
         self._log("Ingestion complete.")
+        self.ingest_token_label.configure(
+            text=self.tracker.summary("insert")
+        )
         self._pending.clear()
         self.file_listbox.delete(0, tk.END)
         self.btn_select.configure(state=tk.NORMAL)
@@ -248,6 +328,8 @@ class RAGPlaygroundApp:
         self.response_text.insert(tk.END, "Querying…\n")
         self.response_text.configure(state=tk.DISABLED)
 
+        self.tracker.reset("query")
+        self.tracker.set_phase("query")
         mode = self.query_mode.get()
         threading.Thread(
             target=self._query_worker, args=(prompt, mode), daemon=True
@@ -268,12 +350,17 @@ class RAGPlaygroundApp:
         self.response_text.configure(state=tk.DISABLED)
         self.query_spinner.stop()
         self.btn_query.configure(state=tk.NORMAL)
+        self.query_token_label.configure(
+            text=self.tracker.summary("query")
+        )
 
     def _on_clear_query(self):
         self.prompt_text.delete("1.0", tk.END)
         self.response_text.configure(state=tk.NORMAL)
         self.response_text.delete("1.0", tk.END)
         self.response_text.configure(state=tk.DISABLED)
+        self.tracker.reset("query")
+        self.query_token_label.configure(text="Tokens: —")
 
 
 # ---------------------------------------------------------------------------

@@ -5,10 +5,13 @@ No chat/LLM adapter — that responsibility belongs to the caller.
 
 import asyncio
 import base64
-from typing import List, Optional
+from typing import Any, Callable, List, Optional
 
 import aiohttp
 from openai import OpenAI
+
+# Callback signature: (adapter_name: str, usage: dict) -> None
+UsageCallback = Callable[[str, dict[str, Any]], None]
 
 from .config import (
     DASHSCOPE_API_KEY,
@@ -41,13 +44,21 @@ class LLMAdapter:
         model: str = LLM_MODEL,
         url: str = LLM_URL,
         api_key: str = DASHSCOPE_API_KEY,
+        on_usage: Optional[UsageCallback] = None,
     ):
         self.model = model
         self.url = url
+        self.on_usage = on_usage
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
 
     async def __call__(
         self,
@@ -79,6 +90,8 @@ class LLMAdapter:
             ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
+                if self.on_usage and "usage" in data:
+                    self.on_usage("llm", data["usage"])
                 return data["choices"][0]["message"]["content"]
 
 
@@ -96,13 +109,21 @@ class VLMAdapter:
         model: str = VLM_MODEL,
         url: str = VLM_URL,
         api_key: str = DASHSCOPE_API_KEY,
+        on_usage: Optional[UsageCallback] = None,
     ):
         self.model = model
         self.url = url
+        self.on_usage = on_usage
         self._headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
 
     async def __call__(
         self,
@@ -155,6 +176,8 @@ class VLMAdapter:
             async with session.post(self.url, json=payload, headers=self._headers) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
+                if self.on_usage and "usage" in data:
+                    self.on_usage("vlm", data["usage"])
                 return data["choices"][0]["message"]["content"]
 
 
@@ -167,10 +190,18 @@ class EmbeddingAdapter:
         base_url: str = EMBED_URL,
         api_key: str = DASHSCOPE_API_KEY,
         dim: int = EMBED_DIM,
+        on_usage: Optional[UsageCallback] = None,
     ):
         self.model = model
         self.dim = dim
+        self.on_usage = on_usage
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
 
     async def embed(self, texts: str | list[str]) -> list[float] | list[list[float]]:
         """Embed a single string or list of strings.
@@ -186,5 +217,10 @@ class EmbeddingAdapter:
             input=inputs,
             dimensions=self.dim,
         )
+        if self.on_usage and hasattr(resp, "usage") and resp.usage:
+            self.on_usage("embedding", {
+                "prompt_tokens": resp.usage.prompt_tokens,
+                "total_tokens": resp.usage.total_tokens,
+            })
         embeddings = [item.embedding for item in resp.data]
         return embeddings[0] if single else embeddings
