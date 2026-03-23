@@ -18,7 +18,7 @@ import numpy as np
 from raganything import RAGAnything, RAGAnythingConfig
 from lightrag.utils import EmbeddingFunc
 
-from .adapters import VLMAdapter, EmbeddingAdapter
+from .adapters import LLMAdapter, VLMAdapter, EmbeddingAdapter
 from .config import EMBED_DIM
 
 
@@ -37,7 +37,8 @@ class RAGService:
                 **kwargs,
             ) -> str
 
-        The caller (e.g. AI-ModelLayer) provides this.
+        Defaults to ``LLMAdapter()`` (DashScope Qwen).
+        The caller (e.g. AI-ModelLayer) can override this.
 
     working_dir:
         Local directory for LightRAG's KV stores (graph JSON, doc status, cache).
@@ -77,7 +78,7 @@ class RAGService:
 
     def __init__(
         self,
-        llm_model_func: Callable[..., Coroutine[Any, Any, str]],
+        llm_model_func: Optional[LLMAdapter] = None,
         working_dir: str = "rag_workdir",
         workspace: str = "",
         vlm_adapter: Optional[VLMAdapter] = None,
@@ -88,7 +89,7 @@ class RAGService:
         enable_table_processing: bool = True,
         enable_equation_processing: bool = True,
     ):
-        self.llm_model_func = llm_model_func
+        self.llm_model_func = llm_model_func or LLMAdapter()
         self.working_dir = working_dir
         self.workspace = workspace
         self.vlm = vlm_adapter or VLMAdapter()

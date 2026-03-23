@@ -12,6 +12,13 @@ load_dotenv()
 # --- DashScope API ---
 DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
 
+# --- LLM (Text) ---
+LLM_MODEL: str = os.getenv("LLM_MODEL", "qwen-plus")
+LLM_URL: str = os.getenv(
+    "LLM_URL",
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+)
+
 # --- VLM (Vision Language Model) ---
 VLM_MODEL: str = os.getenv("VLM_MODEL", "qwen-vl-max")
 VLM_URL: str = os.getenv(

@@ -12,6 +12,8 @@ from openai import OpenAI
 
 from .config import (
     DASHSCOPE_API_KEY,
+    LLM_MODEL,
+    LLM_URL,
     VLM_MODEL,
     VLM_URL,
     EMBED_MODEL,
@@ -24,6 +26,60 @@ _HEADERS = {
     "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
     "Content-Type": "application/json",
 }
+
+
+class LLMAdapter:
+    """LightRAG-compatible text LLM adapter backed by DashScope Qwen.
+
+    Default convenience adapter so callers (e.g. the playground) don't need
+    to hand-roll an ``llm_model_func``.  The caller can still provide its
+    own function to ``RAGService`` instead.
+    """
+
+    def __init__(
+        self,
+        model: str = LLM_MODEL,
+        url: str = LLM_URL,
+        api_key: str = DASHSCOPE_API_KEY,
+    ):
+        self.model = model
+        self.url = url
+        self._headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+    async def __call__(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        history_messages: Optional[list] = None,
+        **kwargs,
+    ) -> str:
+        """LightRAG-compatible LLM function."""
+        msgs: list[dict] = []
+        if system_prompt:
+            msgs.append({"role": "system", "content": system_prompt})
+        for m in (history_messages or []):
+            msgs.append(m)
+        msgs.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": self.model,
+            "messages": msgs,
+            "max_tokens": kwargs.get("max_tokens", 4096),
+            "temperature": kwargs.get("temperature", 0.1),
+        }
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=TIMEOUT)
+        ) as session:
+            async with session.post(
+                self.url, json=payload, headers=self._headers
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
 
 
 class VLMAdapter:

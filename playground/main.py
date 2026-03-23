@@ -20,56 +20,10 @@ import tkinter as tk
 from tkinter import filedialog, scrolledtext, ttk
 from pathlib import Path
 
-import aiohttp
-
 # Ensure rag_shared is importable when running from repo root
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from rag_shared import RAGService
-from rag_shared.config import DASHSCOPE_API_KEY, TIMEOUT
-
-
-# ---------------------------------------------------------------------------
-# Real LLM — uses DashScope Qwen text model for KG entity/relation extraction
-# ---------------------------------------------------------------------------
-_LLM_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-_LLM_MODEL = "qwen-plus"
-_LLM_HEADERS = {
-    "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
-    "Content-Type": "application/json",
-}
-
-
-async def _qwen_llm(
-    prompt: str,
-    system_prompt: str | None = None,
-    history_messages: list | None = None,
-    **kwargs,
-) -> str:
-    """LightRAG-compatible LLM function backed by DashScope Qwen."""
-    msgs = []
-    if system_prompt:
-        msgs.append({"role": "system", "content": system_prompt})
-    for m in (history_messages or []):
-        msgs.append(m)
-    msgs.append({"role": "user", "content": prompt})
-
-    payload = {
-        "model": _LLM_MODEL,
-        "messages": msgs,
-        "max_tokens": kwargs.get("max_tokens", 4096),
-        "temperature": kwargs.get("temperature", 0.1),
-    }
-
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=TIMEOUT)
-    ) as session:
-        async with session.post(
-            _LLM_URL, json=payload, headers=_LLM_HEADERS
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
-            return data["choices"][0]["message"]["content"]
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +56,7 @@ class RAGPlaygroundApp:
         root.geometry("800x620")
         root.minsize(700, 500)
 
-        self.service = RAGService(llm_model_func=_qwen_llm, workspace="playground")
+        self.service = RAGService(workspace="playground")
         self._pending: list[str] = []
 
         self._build_ui()
