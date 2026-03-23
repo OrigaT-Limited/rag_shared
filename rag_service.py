@@ -245,4 +245,15 @@ class RAGService:
             The generated answer.
         """
         rag = await self._ensure_initialized()
+        # Ensure the internal LightRAG instance is initialized (it is normally
+        # created lazily during insert; for query-only sessions we initialize it
+        # here, skipping the document-parser installation check which is only
+        # relevant for ingestion).
+        if rag.lightrag is None:
+            rag._parser_installation_checked = True
+            result = await rag._ensure_lightrag_initialized()
+            if isinstance(result, dict) and not result.get("success", True):
+                raise RuntimeError(
+                    f"Failed to initialize LightRAG for query: {result.get('error')}"
+                )
         return await rag.aquery(question, mode=mode)
