@@ -216,6 +216,14 @@ class RAGPlaygroundApp:
         )
         mode_combo.pack(side=tk.LEFT, padx=(0, 10))
 
+        self.query_vlm_enhanced = tk.BooleanVar(value=True)
+        self.query_vlm_enhanced_toggle = ttk.Checkbutton(
+            ctrl_frame,
+            text="VLM enhanced",
+            variable=self.query_vlm_enhanced,
+        )
+        self.query_vlm_enhanced_toggle.pack(side=tk.LEFT, padx=(0, 10))
+
         self.btn_query = ttk.Button(
             ctrl_frame, text="Send Query", command=self._on_query
         )
@@ -409,13 +417,22 @@ class RAGPlaygroundApp:
         self.tracker.reset("query")
         self.tracker.set_phase("query")
         mode = self.query_mode.get()
+        vlm_enhanced = self.query_vlm_enhanced.get()
         threading.Thread(
-            target=self._query_worker, args=(prompt, mode), daemon=True
+            target=self._query_worker,
+            args=(prompt, mode, vlm_enhanced),
+            daemon=True,
         ).start()
 
-    def _query_worker(self, prompt: str, mode: str):
+    def _query_worker(self, prompt: str, mode: str, vlm_enhanced: bool):
         try:
-            future = _run_coro(self.service.query(prompt, mode=mode))
+            future = _run_coro(
+                self.service.query(
+                    prompt,
+                    mode=mode,
+                    vlm_enhanced=vlm_enhanced,
+                )
+            )
             result = future.result()
             self.root.after(0, self._show_response, result)
         except Exception as exc:

@@ -229,6 +229,7 @@ class RAGService:
         question: str,
         *,
         mode: str = "hybrid",
+        vlm_enhanced: bool | None = None,
     ) -> str:
         """Query the knowledge graph + vector store.
 
@@ -238,7 +239,12 @@ class RAGService:
             The user's question.
         mode:
             LightRAG query mode: ``"naive"``, ``"local"``, ``"global"``,
-            ``"hybrid"`` (default), or ``"mix"``.
+            ``"hybrid"`` (default), ``"mix"``, or ``"bypass"``.
+        vlm_enhanced:
+            Whether to replace image paths in retrieved context with encoded
+            images for VLM-assisted answering. ``None`` defers to RAGAnything's
+            default behavior, which enables this automatically when a vision
+            model is available.
 
         Returns
         -------
@@ -257,4 +263,7 @@ class RAGService:
                 raise RuntimeError(
                     f"Failed to initialize LightRAG for query: {result.get('error')}"
                 )
-        return await rag.aquery(question, mode=mode)
+        query_kwargs: dict[str, Any] = {}
+        if vlm_enhanced is not None:
+            query_kwargs["vlm_enhanced"] = vlm_enhanced
+        return await rag.aquery(question, mode=mode, **query_kwargs)
