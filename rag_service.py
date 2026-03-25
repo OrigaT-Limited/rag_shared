@@ -10,16 +10,58 @@ VLM and embedding are handled internally via adapters.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Optional
 
 import numpy as np
 
+from lightrag import QueryParam
 from raganything import RAGAnything, RAGAnythingConfig
 from lightrag.utils import EmbeddingFunc
 
 from .adapters import LLMAdapter, VLMAdapter, EmbeddingAdapter
 from .config import EMBED_DIM
+
+
+@dataclass(slots=True)
+class RetrievalResult:
+    """Structured retrieval context returned by ``RAGService.retrieve()``."""
+
+    query: str
+    mode: str
+    chunks: list[dict[str, Any]] = field(default_factory=list)
+    entities: list[dict[str, Any]] = field(default_factory=list)
+    relationships: list[dict[str, Any]] = field(default_factory=list)
+
+    def format_for_llm(self, max_chunks: int = 10) -> str:
+        """Render retrieval results as compact prompt context."""
+        parts: list[str] = []
+
+        if self.chunks:
+            parts.append("## Relevant document passages")
+            for chunk in self.chunks[:max_chunks]:
+                source = chunk.get("file_path", "unknown")
+                content = chunk.get("content", "")
+                parts.append(f"[{source}]\n{content}")
+
+        if self.entities:
+            parts.append("## Knowledge graph entities")
+            for entity in self.entities[:20]:
+                entity_name = entity.get("entity_name", "")
+                entity_type = entity.get("entity_type", "")
+                description = entity.get("description", "")
+                parts.append(f"- {entity_name} ({entity_type}): {description}")
+
+        if self.relationships:
+            parts.append("## Knowledge graph relationships")
+            for relationship in self.relationships[:20]:
+                src_id = relationship.get("src_id", "")
+                tgt_id = relationship.get("tgt_id", "")
+                description = relationship.get("description", "")
+                parts.append(f"- {src_id} -> {tgt_id}: {description}")
+
+        return "\n\n".join(parts) if parts else "No relevant context found."
 
 
 class RAGService:
@@ -148,6 +190,18 @@ class RAGService:
         )
         return self._rag
 
+    async def _ensure_lightrag_ready(self, operation: str) -> RAGAnything:
+        """Ensure the internal LightRAG instance exists for query-style operations."""
+        rag = await self._ensure_initialized()
+        if rag.lightrag is None:
+            rag._parser_installation_checked = True
+            result = await rag._ensure_lightrag_initialized()
+            if isinstance(result, dict) and not result.get("success", True):
+                raise RuntimeError(
+                    f"Failed to initialize LightRAG for {operation}: {result.get('error')}"
+                )
+        return rag
+
     async def insert(
         self,
         content_list: list[dict[str, Any]],
@@ -251,19 +305,36 @@ class RAGService:
         str
             The generated answer.
         """
-        rag = await self._ensure_initialized()
-        # Ensure the internal LightRAG instance is initialized (it is normally
-        # created lazily during insert; for query-only sessions we initialize it
-        # here, skipping the document-parser installation check which is only
-        # relevant for ingestion).
-        if rag.lightrag is None:
-            rag._parser_installation_checked = True
-            result = await rag._ensure_lightrag_initialized()
-            if isinstance(result, dict) and not result.get("success", True):
-                raise RuntimeError(
-                    f"Failed to initialize LightRAG for query: {result.get('error')}"
-                )
+        rag = await self._ensure_lightrag_ready("query")
         query_kwargs: dict[str, Any] = {}
         if vlm_enhanced is not None:
             query_kwargs["vlm_enhanced"] = vlm_enhanced
         return await rag.aquery(question, mode=mode, **query_kwargs)
+
+    async def retrieve(
+        self,
+        question: str,
+        *,
+        param: QueryParam | None = None,
+    ) -> RetrievalResult:
+        """Retrieve structured context without running answer generation.
+
+        Parameters
+        ----------
+        question:
+            The user's question.
+        param:
+            Optional LightRAG query parameters. Defaults to ``QueryParam(mode="hybrid")``.
+        """
+        rag = await self._ensure_lightrag_ready("retrieval")
+        query_param = param or QueryParam(mode="hybrid")
+        raw = await rag.lightrag.aquery_data(question, param=query_param)
+        data = raw.get("data", {}) if isinstance(raw, dict) else {}
+        return RetrievalResult(
+            query=question,
+            mode=query_param.mode,
+            chunks=data.get("chunks", []),
+            entities=data.get("entities", []),
+            relationships=data.get("relationships", []),
+        )
+ 

@@ -2,10 +2,11 @@
 
 from .adapters import EmbeddingAdapter, LLMAdapter, UsageCallback, VLMAdapter
 from .config import EMBED_DIM
-from .rag_service import RAGService
+from .rag_service import RAGService, RetrievalResult
 
 __all__ = [
     "RAGService",
+    "RetrievalResult",
     "LLMAdapter",
     "VLMAdapter",
     "EmbeddingAdapter",
