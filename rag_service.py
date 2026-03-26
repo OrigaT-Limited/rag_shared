@@ -11,6 +11,7 @@ VLM and embedding are handled internally via adapters.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from dataclasses import dataclass, field
 import os
 from typing import Any, Optional
@@ -130,7 +131,8 @@ class RAGService:
         cosine_threshold: float = 0.5,
         enable_image_processing: bool = True,
         enable_table_processing: bool = True,
-        enable_equation_processing: bool = True,
+        enable_equation_processing: bool = False,
+        excluded_content_types: Collection[str] | None = None,
     ):
         self.llm_model_func = llm_model_func or LLMAdapter()
         self.working_dir = working_dir
@@ -142,9 +144,56 @@ class RAGService:
         self.enable_image_processing = enable_image_processing
         self.enable_table_processing = enable_table_processing
         self.enable_equation_processing = enable_equation_processing
+        self.excluded_content_types = self._normalize_content_types(
+            excluded_content_types
+        )
 
         self._rag: Optional[RAGAnything] = None
         self._init_lock = asyncio.Lock()
+
+    @staticmethod
+    def _normalize_content_types(
+        content_types: Collection[str] | None,
+    ) -> frozenset[str]:
+        if not content_types:
+            return frozenset()
+
+        return frozenset(
+            content_type.strip().lower()
+            for content_type in content_types
+            if isinstance(content_type, str) and content_type.strip()
+        )
+
+    def _resolve_excluded_content_types(
+        self,
+        excluded_content_types: Collection[str] | None,
+    ) -> frozenset[str]:
+        if excluded_content_types is None:
+            return self.excluded_content_types
+
+        return self._normalize_content_types(excluded_content_types)
+
+    def _filter_content_list(
+        self,
+        content_list: list[dict[str, Any]],
+        *,
+        excluded_content_types: Collection[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        resolved_excluded_types = self._resolve_excluded_content_types(
+            excluded_content_types
+        )
+        if not resolved_excluded_types:
+            return content_list
+
+        return [
+            item
+            for item in content_list
+            if not (
+                isinstance(item, dict)
+                and isinstance(item.get("type"), str)
+                and item["type"].strip().lower() in resolved_excluded_types
+            )
+        ]
 
     def _build_rag_instance(self) -> RAGAnything:
         """Construct the upstream RAGAnything instance off the event loop."""
@@ -222,6 +271,7 @@ class RAGService:
         file_path: str,
         *,
         display_stats: bool = False,
+        excluded_content_types: Collection[str] | None = None,
     ) -> dict:
         """Ingest content into the knowledge graph + vector store.
 
@@ -251,14 +301,25 @@ class RAGService:
         display_stats:
             Whether to print ingestion statistics.
 
+        excluded_content_types:
+            Content block types to skip before chunk generation. For example,
+            pass ``{"footer"}`` to exclude footer blocks from ingestion.
+
         Returns
         -------
         dict
             Result from RAGAnything's ``insert_content_list``.
         """
         rag = await self._ensure_initialized()
+        filtered_content_list = self._filter_content_list(
+            content_list,
+            excluded_content_types=excluded_content_types,
+        )
+        if not filtered_content_list:
+            raise ValueError("All content blocks were excluded before ingestion.")
+
         return await rag.insert_content_list(
-            content_list=content_list,
+            content_list=filtered_content_list,
             file_path=file_path,
             display_stats=display_stats,
         )
@@ -269,6 +330,12 @@ class RAGService:
         output_dir: str | None = None,
         *,
         display_stats: bool = False,
+        parse_method: str | None = None,
+        split_by_character: str | None = None,
+        split_by_character_only: bool = False,
+        doc_id: str | None = None,
+        excluded_content_types: Collection[str] | None = None,
+        **parser_kwargs: Any,
     ) -> dict:
         """Ingest a document file (PDF, DOCX, etc.) via RAGAnything's built-in parser.
 
@@ -282,13 +349,53 @@ class RAGService:
             Directory for parser output. Defaults to ``{working_dir}/parsed``.
         display_stats:
             Whether to print ingestion statistics.
+        parse_method:
+            Parser method forwarded to ``RAGAnything.parse_document()``.
+        split_by_character:
+            Optional character passed to LightRAG chunk splitting.
+        split_by_character_only:
+            Whether LightRAG should split only by ``split_by_character``.
+        doc_id:
+            Optional stable document id for deduplication and tracking.
+        excluded_content_types:
+            Content block types to skip before chunk generation. For example,
+            pass ``{"footer"}`` to exclude footer blocks from ingestion.
+        parser_kwargs:
+            Additional parser-specific options forwarded to
+            ``RAGAnything.parse_document()``.
         """
         rag = await self._ensure_initialized()
         if output_dir is None:
             output_dir = os.path.join(self.working_dir, "parsed")
-        return await rag.process_document_complete(
+
+        content_list, parsed_doc_id = await rag.parse_document(
             file_path=file_path,
             output_dir=output_dir,
+            display_stats=display_stats,
+            parse_method=parse_method,
+            **parser_kwargs,
+        )
+        filtered_content_list = self._filter_content_list(
+            content_list,
+            excluded_content_types=excluded_content_types,
+        )
+        if not filtered_content_list:
+            raise ValueError("All parsed content blocks were excluded before ingestion.")
+
+        effective_doc_id = doc_id
+        if effective_doc_id is None:
+            effective_doc_id = (
+                parsed_doc_id
+                if len(filtered_content_list) == len(content_list)
+                else rag._generate_content_based_doc_id(filtered_content_list)
+            )
+
+        return await rag.insert_content_list(
+            content_list=filtered_content_list,
+            file_path=file_path,
+            split_by_character=split_by_character,
+            split_by_character_only=split_by_character_only,
+            doc_id=effective_doc_id,
             display_stats=display_stats,
         )
 
