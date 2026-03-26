@@ -47,6 +47,7 @@ class RAGPlaygroundApp:
             vlm_adapter=vlm,
             embedding_adapter=emb,
             workspace="default",
+            excluded_content_types={"footer"},
         )
 
         self._build_ui()
