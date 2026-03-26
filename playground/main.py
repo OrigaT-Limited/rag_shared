@@ -22,6 +22,7 @@ from tkinter import filedialog, scrolledtext, ttk
 from pathlib import Path
 from typing import Any
 
+from lightrag import QueryParam
 from redis import Redis
 
 # Ensure rag_shared is importable when running from repo root
@@ -39,11 +40,12 @@ class TokenTracker:
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._phase: str = "insert"  # "insert" or "query"
+        self._phase: str = "insert"  # "insert", "query", or "retrieve"
         # {phase: {adapter: {field: count}}}
         self._counts: dict[str, dict[str, dict[str, int]]] = {
             "insert": {},
             "query": {},
+            "retrieve": {},
         }
 
     def set_phase(self, phase: str):
@@ -122,7 +124,7 @@ class RAGPlaygroundApp:
             llm_model_func=llm,
             vlm_adapter=vlm,
             embedding_adapter=emb,
-            workspace="playground",
+            workspace="default",
         )
         self._pending: list[str] = []
         self._chunk_rows: list[dict[str, Any]] = []
@@ -146,7 +148,12 @@ class RAGPlaygroundApp:
         notebook.add(query_tab, text="Query")
         self._build_query_tab(query_tab)
 
-        # --- Tab 3: Chunks ---
+        # --- Tab 3: Retrieve ---
+        retrieve_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(retrieve_tab, text="Retrieve")
+        self._build_retrieve_tab(retrieve_tab)
+
+        # --- Tab 4: Chunks ---
         chunks_tab = ttk.Frame(notebook, padding=8)
         notebook.add(chunks_tab, text="Chunks")
         self._build_chunks_tab(chunks_tab)
@@ -314,6 +321,66 @@ class RAGPlaygroundApp:
         )
         self.chunk_detail_text.pack(fill=tk.BOTH, expand=True)
 
+    def _build_retrieve_tab(self, parent: ttk.Frame):
+        prompt_frame = ttk.LabelFrame(parent, text="Prompt", padding=6)
+        prompt_frame.pack(fill=tk.BOTH, expand=False, pady=(0, 4))
+
+        self.retrieve_prompt_text = scrolledtext.ScrolledText(
+            prompt_frame,
+            height=5,
+            wrap=tk.WORD,
+        )
+        self.retrieve_prompt_text.pack(fill=tk.BOTH, expand=True)
+
+        ctrl_frame = ttk.Frame(parent)
+        ctrl_frame.pack(fill=tk.X, pady=4)
+
+        ttk.Label(ctrl_frame, text="Mode:").pack(side=tk.LEFT, padx=(0, 4))
+        self.retrieve_mode = tk.StringVar(value="hybrid")
+        retrieve_mode_combo = ttk.Combobox(
+            ctrl_frame,
+            textvariable=self.retrieve_mode,
+            values=["naive", "local", "global", "hybrid", "mix", "bypass"],
+            state="readonly",
+            width=10,
+        )
+        retrieve_mode_combo.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_retrieve = ttk.Button(
+            ctrl_frame,
+            text="Run Retrieve",
+            command=self._on_retrieve,
+        )
+        self.btn_retrieve.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.btn_clear_retrieve = ttk.Button(
+            ctrl_frame,
+            text="Clear",
+            command=self._on_clear_retrieve,
+        )
+        self.btn_clear_retrieve.pack(side=tk.LEFT)
+
+        self.retrieve_spinner = ttk.Progressbar(
+            ctrl_frame,
+            mode="indeterminate",
+            length=80,
+        )
+        self.retrieve_spinner.pack(side=tk.RIGHT)
+
+        self.retrieve_token_label = ttk.Label(parent, text="Tokens: —", anchor=tk.W)
+        self.retrieve_token_label.pack(fill=tk.X, pady=(0, 2))
+
+        result_frame = ttk.LabelFrame(parent, text="Retrieve Result", padding=6)
+        result_frame.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        self.retrieve_response_text = scrolledtext.ScrolledText(
+            result_frame,
+            state=tk.DISABLED,
+            height=12,
+            wrap=tk.WORD,
+        )
+        self.retrieve_response_text.pack(fill=tk.BOTH, expand=True)
+
     # ---- Logging helper ----------------------------------------------------
     def _log(self, msg: str):
         self.log.configure(state=tk.NORMAL)
@@ -456,6 +523,86 @@ class RAGPlaygroundApp:
         self.response_text.configure(state=tk.DISABLED)
         self.tracker.reset("query")
         self.query_token_label.configure(text="Tokens: —")
+
+    # ---- Retrieve callbacks ------------------------------------------------
+    def _on_retrieve(self):
+        prompt = self.retrieve_prompt_text.get("1.0", tk.END).strip()
+        if not prompt:
+            return
+        self.btn_retrieve.configure(state=tk.DISABLED)
+        self.retrieve_spinner.start(10)
+        self.retrieve_response_text.configure(state=tk.NORMAL)
+        self.retrieve_response_text.delete("1.0", tk.END)
+        self.retrieve_response_text.insert(tk.END, "Retrieving…\n")
+        self.retrieve_response_text.configure(state=tk.DISABLED)
+
+        self.tracker.reset("retrieve")
+        self.tracker.set_phase("retrieve")
+        mode = self.retrieve_mode.get()
+        threading.Thread(
+            target=self._retrieve_worker,
+            args=(prompt, mode),
+            daemon=True,
+        ).start()
+
+    def _retrieve_worker(self, prompt: str, mode: str):
+        try:
+            future = _run_coro(
+                self.service.retrieve(
+                    prompt,
+                    param=QueryParam(mode=mode),
+                )
+            )
+            result = future.result()
+            self.root.after(0, self._show_retrieve_response, result)
+        except Exception as exc:
+            self.root.after(0, self._show_retrieve_error, str(exc))
+
+    def _show_retrieve_response(self, result):
+        summary_lines = [
+            f"Query: {result.query}",
+            f"Mode: {result.mode}",
+            f"Chunks: {len(result.chunks)}",
+            f"Entities: {len(result.entities)}",
+            f"Relationships: {len(result.relationships)}",
+        ]
+        payload = {
+            "query": result.query,
+            "mode": result.mode,
+            "chunks": result.chunks,
+            "entities": result.entities,
+            "relationships": result.relationships,
+        }
+        sections = [
+            "\n".join(summary_lines),
+            "Formatted context:\n" + result.format_for_llm(),
+            "Raw JSON:\n" + json.dumps(payload, indent=2, ensure_ascii=False),
+        ]
+
+        self.retrieve_response_text.configure(state=tk.NORMAL)
+        self.retrieve_response_text.delete("1.0", tk.END)
+        self.retrieve_response_text.insert(tk.END, "\n\n".join(sections))
+        self.retrieve_response_text.configure(state=tk.DISABLED)
+        self.retrieve_spinner.stop()
+        self.btn_retrieve.configure(state=tk.NORMAL)
+        self.retrieve_token_label.configure(text=self.tracker.summary("retrieve"))
+
+    def _show_retrieve_error(self, error_text: str):
+        self.retrieve_response_text.configure(state=tk.NORMAL)
+        self.retrieve_response_text.delete("1.0", tk.END)
+        self.retrieve_response_text.insert(tk.END, f"Error: {error_text}")
+        self.retrieve_response_text.configure(state=tk.DISABLED)
+        self.retrieve_spinner.stop()
+        self.btn_retrieve.configure(state=tk.NORMAL)
+        self.retrieve_token_label.configure(text=self.tracker.summary("retrieve"))
+
+    def _on_clear_retrieve(self):
+        self.retrieve_prompt_text.delete("1.0", tk.END)
+        self.retrieve_response_text.configure(state=tk.NORMAL)
+        self.retrieve_response_text.delete("1.0", tk.END)
+        self.retrieve_response_text.configure(state=tk.DISABLED)
+        self.tracker.reset("retrieve")
+        self.retrieve_token_label.configure(text="Tokens: —")
 
     # ---- Chunk browser ----------------------------------------------------
     def _clear_chunk_filter(self):
