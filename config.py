@@ -5,9 +5,50 @@ The chat/LLM layer is owned by the caller (e.g. AI-ModelLayer).
 """
 
 import os
-from dotenv import load_dotenv
+from pathlib import Path
+from urllib.parse import urlparse
 
-load_dotenv()
+from dotenv import dotenv_values, load_dotenv
+
+
+def _iter_dotenv_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    for base in [Path.cwd(), *Path(__file__).resolve().parents]:
+        candidate = base / ".env"
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            candidates.append(candidate)
+
+    return candidates
+
+
+def _has_valid_redis_scheme(value: str | None) -> bool:
+    if not value:
+        return False
+    return urlparse(value).scheme in {"redis", "rediss", "unix"}
+
+
+def _load_environment() -> None:
+    dotenv_candidates = _iter_dotenv_candidates()
+    for dotenv_path in dotenv_candidates:
+        load_dotenv(dotenv_path, override=False)
+
+    current_redis_uri = os.getenv("REDIS_URI")
+    if _has_valid_redis_scheme(current_redis_uri):
+        return
+
+    for dotenv_path in dotenv_candidates:
+        dotenv_redis_uri = dotenv_values(dotenv_path).get("REDIS_URI")
+        if _has_valid_redis_scheme(dotenv_redis_uri):
+            os.environ["REDIS_URI"] = dotenv_redis_uri
+            return
+
+
+_load_environment()
 
 # --- DashScope API ---
 DASHSCOPE_API_KEY: str = os.getenv("DASHSCOPE_API_KEY", "")
