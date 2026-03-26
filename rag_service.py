@@ -10,6 +10,7 @@ VLM and embedding are handled internally via adapters.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from typing import Any, Optional
@@ -143,12 +144,10 @@ class RAGService:
         self.enable_equation_processing = enable_equation_processing
 
         self._rag: Optional[RAGAnything] = None
+        self._init_lock = asyncio.Lock()
 
-    async def _ensure_initialized(self) -> RAGAnything:
-        """Lazily initialize RAGAnything on first use."""
-        if self._rag is not None:
-            return self._rag
-
+    def _build_rag_instance(self) -> RAGAnything:
+        """Construct the upstream RAGAnything instance off the event loop."""
         emb_adapter = self.emb
 
         async def _embed(texts):
@@ -165,19 +164,19 @@ class RAGService:
         )
 
         lightrag_kwargs: dict[str, Any] = {
-            # Vector storage → Milvus standalone (3 collections per workspace)
+            # Vector storage -> Milvus standalone (3 collections per workspace)
             "vector_storage": "MilvusVectorDBStorage",
             "vector_db_storage_cls_kwargs": {
                 "cosine_better_than_threshold": self.cosine_threshold,
             },
-            # KV storage → Redis
+            # KV storage -> Redis
             "kv_storage": "RedisKVStorage",
             "doc_status_storage": "RedisDocStatusStorage",
         }
         if self.workspace:
             lightrag_kwargs["workspace"] = self.workspace
 
-        self._rag = RAGAnything(
+        return RAGAnything(
             config=config,
             llm_model_func=self.llm_model_func,
             vision_model_func=self.vlm,
@@ -188,6 +187,17 @@ class RAGService:
             ),
             lightrag_kwargs=lightrag_kwargs,
         )
+
+    async def _ensure_initialized(self) -> RAGAnything:
+        """Lazily initialize RAGAnything on first use."""
+        if self._rag is not None:
+            return self._rag
+
+        async with self._init_lock:
+            if self._rag is not None:
+                return self._rag
+
+            self._rag = await asyncio.to_thread(self._build_rag_instance)
         return self._rag
 
     async def _ensure_lightrag_ready(self, operation: str) -> RAGAnything:
@@ -201,6 +211,10 @@ class RAGService:
                     f"Failed to initialize LightRAG for {operation}: {result.get('error')}"
                 )
         return rag
+
+    async def warmup(self) -> None:
+        """Pre-initialize both RAGAnything and LightRAG for this workspace."""
+        await self._ensure_lightrag_ready("startup warmup")
 
     async def insert(
         self,
