@@ -23,7 +23,7 @@ from raganything import RAGAnything, RAGAnythingConfig
 from lightrag.utils import EmbeddingFunc
 
 from .adapters import LLMAdapter, VLMAdapter, EmbeddingAdapter
-from .config import EMBED_DIM
+from .config import EMBED_DIM, GRAPH_STORAGE
 
 
 @dataclass(slots=True)
@@ -221,6 +221,9 @@ class RAGService:
             # KV storage -> Redis
             "kv_storage": "RedisKVStorage",
             "doc_status_storage": "RedisDocStatusStorage",
+            # Graph storage -> configurable (NetworkXStorage | Neo4JStorage)
+            # Neo4JStorage reads connection settings from env vars directly.
+            "graph_storage": GRAPH_STORAGE,
         }
         if self.workspace:
             lightrag_kwargs["workspace"] = self.workspace
